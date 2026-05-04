@@ -18,10 +18,25 @@ import logger from '../utils/logger'
 import { computeElementVersionHash, mergeSceneElements } from '../utils/syncSceneData'
 import { sanitizeAppStateForSync } from '../utils/sanitizeAppState'
 
+function sanitizeLibraryItems(items: unknown): any[] {
+	if (!Array.isArray(items)) {
+		return []
+	}
+
+	return items.filter((item) => (
+		item
+		&& typeof item === 'object'
+		&& Array.isArray((item as any).elements)
+		&& (item as any).elements.length > 0
+	))
+}
+
 export function useBoardDataManager() {
 	const [isLoading, setIsLoading] = useState(true)
 	const loadingTimeoutsRef = useRef<Set<NodeJS.Timeout>>(new Set())
 	const currentFileIdRef = useRef<number | null>(null)
+	const initialLibraryItemsRef = useRef<any[]>([])
+	const initialLibraryItemsPresentRef = useRef(false)
 
 	const {
 		fileId,
@@ -82,6 +97,9 @@ export function useBoardDataManager() {
 	}, [])
 
 	const loadBoard = useCallback(async () => {
+		initialLibraryItemsRef.current = []
+		initialLibraryItemsPresentRef.current = false
+
 		if (isVersionPreview) {
 			try {
 				if (!versionSource) {
@@ -210,6 +228,7 @@ export function useBoardDataManager() {
 					dataToUse = {
 						elements: reconciledElements,
 						files: mergedFiles,
+						...(Array.isArray(serverData.libraryItems) ? { libraryItems: sanitizeLibraryItems(serverData.libraryItems) } : {}),
 						appState: mergedAppState,
 						scrollToContent: serverScrollToContent,
 					}
@@ -266,6 +285,9 @@ export function useBoardDataManager() {
 				const sanitizedAppState = sanitizeAppStateForSync(dataToUse.appState)
 				const finalAppState = { ...defaultSettings, ...sanitizedAppState }
 				const files = dataToUse.files || {}
+				const libraryItems = sanitizeLibraryItems(dataToUse.libraryItems)
+				initialLibraryItemsRef.current = libraryItems
+				initialLibraryItemsPresentRef.current = Array.isArray(dataToUse.libraryItems)
 
 				// Force a small delay to ensure the component is ready to receive the data
 				const timeout = setTimeout(() => {
@@ -396,9 +418,14 @@ export function useBoardDataManager() {
 		}
 	}, [cancelPendingTimeouts])
 
+	const getInitialLibraryItems = useCallback(() => initialLibraryItemsRef.current, [])
+	const getInitialLibraryItemsPresent = useCallback(() => initialLibraryItemsPresentRef.current, [])
+
 	return {
 		isLoading,
 		loadBoard,
 		saveOnUnmount,
+		getInitialLibraryItems,
+		getInitialLibraryItemsPresent,
 	}
 }

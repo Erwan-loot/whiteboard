@@ -10,10 +10,19 @@ declare(strict_types=1);
 
 namespace OCA\Whiteboard\AppInfo;
 
+use OCA\Whiteboard\Template\GlobalLibraryTemplateProvider;
+use OCP\AppFramework\Bootstrap\IRegistrationContext;
+use OCP\Util;
+
 class ApplicationTest extends \Test\TestCase {
 
 	public function testApp(): void {
-		$registrationContext = $this->createMock(\OCP\AppFramework\Bootstrap\IRegistrationContext::class);
+		$registrationContext = $this->createMock(IRegistrationContext::class);
+		[$major] = Util::getVersion();
+		$registrationContext->expects($major >= 30 ? $this->once() : $this->never())
+			->method('registerTemplateProvider')
+			->with(GlobalLibraryTemplateProvider::class);
+
 		$app = new Application();
 		$app->register($registrationContext);
 		self::assertTrue(true);

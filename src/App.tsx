@@ -5,13 +5,14 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { FormEvent } from 'react'
 import { getCurrentUser } from '@nextcloud/auth'
-import { translate as t } from '@nextcloud/l10n'
+import { translate as t, translatePlural as n } from '@nextcloud/l10n'
 import { loadState } from '@nextcloud/initial-state'
 import { Excalidraw as ExcalidrawComponent, useHandleLibrary, Sidebar, isElementLink } from '@nextcloud/excalidraw'
 import '@excalidraw/excalidraw/index.css'
-import type { LibraryItems } from '@nextcloud/excalidraw/dist/types/excalidraw/types'
+import type { ExcalidrawImperativeAPI, LibraryItems } from '@nextcloud/excalidraw/dist/types/excalidraw/types'
 import { useExcalidrawStore } from './stores/useExcalidrawStore'
 import { useWhiteboardConfigStore } from './stores/useWhiteboardConfigStore'
 import { useThemeHandling } from './hooks/useThemeHandling'
@@ -54,12 +55,19 @@ import { VotingSidebar } from './components/VotingSidebar'
 import { useVoting } from './hooks/useVoting'
 import { useContextMenuFilter } from './hooks/useContextMenuFilter'
 import { useDisableExternalLibraries } from './hooks/useDisableExternalLibraries'
+import { showError, showSuccess } from '@nextcloud/dialogs'
 
 const Excalidraw = memo(ExcalidrawComponent)
 
 const MemoizedNetworkStatusIndicator = memo(NetworkStatusIndicator)
 const MemoizedAuthErrorNotification = memo(AuthErrorNotification)
 const MemoizedExcalidrawMenu = memo(ExcalidrawMenu)
+
+type LibraryTemplateDialogSource = 'library' | 'selection'
+
+function formatLibraryItemCount(count: number): string {
+	return n('whiteboard', '%n library item', '%n library items', count)
+}
 
 export interface WhiteboardAppProps {
 	fileId: number
@@ -130,7 +138,14 @@ export default function App({
 	const { renderAssistant } = useAssistant()
 	const { renderEmojiPicker } = useEmojiPicker()
 	const { onChange: onChangeSync, onPointerUpdate } = useSync()
-	const { fetchLibraryItems, updateLibraryItems, isLibraryLoaded, setIsLibraryLoaded } = useLibrary()
+	const { fetchLibraryItems, updateLibraryItems, saveLibraryTemplate, isLibraryLoaded, setIsLibraryLoaded } = useLibrary()
+	const initialLibraryItemIdsRef = useRef<Set<string>>(new Set())
+	const [libraryTemplateDialogItems, setLibraryTemplateDialogItems] = useState<LibraryItems | null>(null)
+	const [libraryTemplateDialogSource, setLibraryTemplateDialogSource] = useState<LibraryTemplateDialogSource>('library')
+	const [libraryTemplateName, setLibraryTemplateName] = useState('')
+	const [libraryTemplateError, setLibraryTemplateError] = useState<string | null>(null)
+	const [isSavingLibraryTemplate, setIsSavingLibraryTemplate] = useState(false)
+	const libraryTemplateNameInputRef = useRef<HTMLInputElement | null>(null)
 	useCollaboration()
 	const { isReadOnly, refreshReadOnlyState } = useReadOnlyState()
 
@@ -164,6 +179,12 @@ export default function App({
 
 	useContextMenuFilter(excalidrawAPI)
 	useDisableExternalLibraries()
+
+	useEffect(() => {
+		if (libraryTemplateDialogItems) {
+			libraryTemplateNameInputRef.current?.focus()
+		}
+	}, [libraryTemplateDialogItems])
 
 	useEffect(() => {
 		const handleVideoError = (e: Event) => {
@@ -285,10 +306,18 @@ export default function App({
 	}, [handleExternalRestore, normalizedFileId])
 
 	// Use the board data manager hook
-	const { saveOnUnmount, isLoading } = useBoardDataManager()
+	const {
+		saveOnUnmount,
+		isLoading,
+		getInitialLibraryItems,
+		getInitialLibraryItemsPresent,
+	} = useBoardDataManager()
 
 	// Effect to handle fileId changes - cleanup previous board data
 	useEffect(() => {
+		setIsLibraryLoaded(false)
+		initialLibraryItemIdsRef.current = new Set<string>()
+
 		// Clear any existing Excalidraw data when fileId changes
 		if (excalidrawAPI) {
 			excalidrawAPI.resetScene()
@@ -303,13 +332,16 @@ export default function App({
 				saveOnUnmount()
 			}
 		}
-	}, [normalizedFileId, excalidrawAPI, resetInitialDataPromise, saveOnUnmount])
+	}, [normalizedFileId, excalidrawAPI, resetInitialDataPromise, saveOnUnmount, setIsLibraryLoaded])
 
 	useEffect(() => {
-		resetInitialDataPromise()
+		if (isLoading) {
+			return
+		}
 
 		// Fetch library items from the API
 		window.name = fileName
+		setIsLibraryLoaded(false)
 		const fetchLibInterval = setInterval(async () => {
 			const api = useExcalidrawStore.getState().excalidrawAPI
 			if (!api) {
@@ -319,8 +351,26 @@ export default function App({
 			clearInterval(fetchLibInterval)
 			try {
 				const libraryItems = await fetchLibraryItems()
+				const embeddedLibraryItems = getInitialLibraryItems()
+				const embeddedLibraryItemIds = new Set(
+					getInitialLibraryItemsPresent()
+						? embeddedLibraryItems.map(item => item?.id).filter((id): id is string => typeof id === 'string' && id !== '')
+						: [],
+				)
+				const mergedLibraryItems = [...(libraryItems || [])]
+				const seenItemIds = new Set(mergedLibraryItems.map(item => item.id).filter(Boolean))
+				for (const item of embeddedLibraryItems) {
+					if (item.id && seenItemIds.has(item.id)) {
+						continue
+					}
+					mergedLibraryItems.push(item)
+					if (item.id) {
+						seenItemIds.add(item.id)
+					}
+				}
+				initialLibraryItemIdsRef.current = embeddedLibraryItemIds
 				await api.updateLibrary({
-					libraryItems: libraryItems || [],
+					libraryItems: mergedLibraryItems,
 				})
 				setIsLibraryLoaded(true)
 			} catch (error) {
@@ -328,7 +378,18 @@ export default function App({
 			}
 		}, 1000)
 
-		// On unmount: Clean up all stores to prevent stale state
+		return () => clearInterval(fetchLibInterval)
+	}, [
+		fileName,
+		fetchLibraryItems,
+		getInitialLibraryItems,
+		getInitialLibraryItemsPresent,
+		isLoading,
+		normalizedFileId,
+		setIsLibraryLoaded,
+	])
+
+	useEffect(() => {
 		return () => {
 			// Save any pending changes before resetting stores
 			saveOnUnmount()
@@ -336,11 +397,12 @@ export default function App({
 			// Reset all stores
 			resetStore()
 			resetExcalidrawAPI()
+			initialLibraryItemIdsRef.current = new Set<string>()
 
 			// Terminate the worker
 			terminateWorker()
 		}
-	}, [resetInitialDataPromise, resetStore, resetExcalidrawAPI, terminateWorker, saveOnUnmount])
+	}, [resetStore, resetExcalidrawAPI, terminateWorker, saveOnUnmount])
 
 	const [activeCommentThreadId, setActiveCommentThreadId] = useState<string | null>(null)
 	const [commentSidebarDocked, setCommentSidebarDocked] = useState(false)
@@ -397,11 +459,11 @@ export default function App({
 			return
 		}
 		try {
-			await updateLibraryItems(items)
+			await updateLibraryItems(items, initialLibraryItemIdsRef.current)
 		} catch (error) {
 			logger.error('[App] Error syncing library items:', error)
 		}
-	}, [isLibraryLoaded])
+	}, [isLibraryLoaded, updateLibraryItems])
 
 	const libraryReturnUrl = encodeURIComponent(window.location.href)
 
@@ -439,6 +501,63 @@ export default function App({
 		return Array.from({ length: 40 }, () => Math.floor(Math.random() * 16).toString(16)).join('')
 	}, [maxImageSizeBytes, maxImageSizeMb])
 
+	const closeLibraryTemplateDialog = useCallback(() => {
+		if (isSavingLibraryTemplate) {
+			return
+		}
+		setLibraryTemplateDialogItems(null)
+		setLibraryTemplateDialogSource('library')
+		setLibraryTemplateName('')
+		setLibraryTemplateError(null)
+	}, [isSavingLibraryTemplate])
+
+	const onLibrarySaveAsTemplate = useCallback((items: LibraryItems, context?: { source?: LibraryTemplateDialogSource }) => {
+		if (isReadOnly || isVersionPreview) {
+			return
+		}
+		if (items.length === 0) {
+			showError(t('whiteboard', 'Add at least one library item before saving a preset.'))
+			return
+		}
+		setLibraryTemplateDialogItems(items)
+		setLibraryTemplateDialogSource(context?.source === 'selection' ? 'selection' : 'library')
+		setLibraryTemplateName('')
+		setLibraryTemplateError(null)
+	}, [isReadOnly, isVersionPreview])
+
+	const submitLibraryTemplateDialog = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+		event.preventDefault()
+		if (!libraryTemplateDialogItems || isSavingLibraryTemplate) {
+			return
+		}
+
+		const templateName = libraryTemplateName.trim()
+		if (templateName === '') {
+			setLibraryTemplateError(t('whiteboard', 'Enter a library preset name.'))
+			return
+		}
+
+		setIsSavingLibraryTemplate(true)
+		setLibraryTemplateError(null)
+		try {
+			await saveLibraryTemplate(templateName, libraryTemplateDialogItems)
+			showSuccess(t('whiteboard', 'Library preset saved.'))
+			setLibraryTemplateDialogItems(null)
+			setLibraryTemplateDialogSource('library')
+			setLibraryTemplateName('')
+		} catch (error) {
+			const status = (error as { status?: number }).status
+			const message = status === 409
+				? t('whiteboard', 'A library preset with this name already exists.')
+				: t('whiteboard', 'Could not save library preset.')
+			setLibraryTemplateError(message)
+			showError(message)
+			logger.error('[App] Error saving library preset:', error)
+		} finally {
+			setIsSavingLibraryTemplate(false)
+		}
+	}, [isSavingLibraryTemplate, libraryTemplateDialogItems, libraryTemplateName, saveLibraryTemplate])
+
 	const handleOnChange = useCallback(() => {
 		if (isVersionPreview) {
 			return
@@ -468,6 +587,15 @@ export default function App({
 	const appClassName = useMemo(() => (
 		isVersionPreview ? 'App App--version-preview' : 'App'
 	), [isVersionPreview])
+
+	const onExcalidrawAPI = useCallback((api: ExcalidrawImperativeAPI | null) => {
+		if (api) {
+			setExcalidrawAPI(api)
+			return
+		}
+
+		resetExcalidrawAPI()
+	}, [resetExcalidrawAPI, setExcalidrawAPI])
 
 	if (isLoading) {
 		return (
@@ -524,7 +652,7 @@ export default function App({
 					validateEmbeddable={() => true}
 					renderEmbeddable={Embeddable}
 					beforeElementCreated={beforeElementCreated}
-					excalidrawAPI={setExcalidrawAPI}
+					onExcalidrawAPI={onExcalidrawAPI}
 					initialData={initialDataPromise}
 					generateIdForFile={generateIdForFile}
 					onPointerUpdate={onPointerUpdate}
@@ -539,6 +667,7 @@ export default function App({
 					}}
 					onLinkOpen={onLinkOpen}
 					onLibraryChange={onLibraryChange}
+					onLibrarySaveAsTemplate={isReadOnly || isVersionPreview ? undefined : onLibrarySaveAsTemplate}
 					langCode={lang}
 					libraryReturnUrl={libraryReturnUrl}
 				>
@@ -615,6 +744,71 @@ export default function App({
 						excalidrawAPI={excalidrawAPI}
 						settings={creatorDisplaySettings}
 					/>
+				)}
+				{libraryTemplateDialogItems && (
+					<div className="library-template-dialog__backdrop">
+						<form
+							className="library-template-dialog"
+							role="dialog"
+							aria-modal="true"
+							aria-labelledby="library-template-dialog-title"
+							onSubmit={submitLibraryTemplateDialog}
+							onKeyDown={(event) => {
+								if (event.key === 'Escape') {
+									event.stopPropagation()
+									closeLibraryTemplateDialog()
+								}
+							}}>
+							<h2 id="library-template-dialog-title">
+								{libraryTemplateDialogSource === 'selection'
+									? t('whiteboard', 'Save selected library items as preset')
+									: t('whiteboard', 'Save library as preset')}
+							</h2>
+							<p className="library-template-dialog__hint">
+								{t('whiteboard', 'Saves reusable Library sidebar items only. The canvas is not included.')}
+							</p>
+							<p className="library-template-dialog__count">
+								{formatLibraryItemCount(libraryTemplateDialogItems.length)}
+							</p>
+							<label htmlFor="library-template-name">
+								{t('whiteboard', 'Library preset name')}
+							</label>
+							<input
+								id="library-template-name"
+								ref={libraryTemplateNameInputRef}
+								type="text"
+								value={libraryTemplateName}
+								disabled={isSavingLibraryTemplate}
+								aria-invalid={libraryTemplateError ? 'true' : undefined}
+								aria-describedby={libraryTemplateError ? 'library-template-error' : undefined}
+								className={libraryTemplateError ? 'library-template-dialog__input--error' : undefined}
+								onChange={(event) => {
+									setLibraryTemplateName(event.target.value)
+									setLibraryTemplateError(null)
+								}}
+							/>
+							{libraryTemplateError && (
+								<p id="library-template-error" className="library-template-dialog__error">
+									{libraryTemplateError}
+								</p>
+							)}
+							<div className="library-template-dialog__actions">
+								<button
+									type="button"
+									className="library-template-dialog__button"
+									disabled={isSavingLibraryTemplate}
+									onClick={closeLibraryTemplateDialog}>
+									{t('whiteboard', 'Cancel')}
+								</button>
+								<button
+									type="submit"
+									className="library-template-dialog__button library-template-dialog__button--primary"
+									disabled={isSavingLibraryTemplate}>
+									{isSavingLibraryTemplate ? t('whiteboard', 'Saving...') : t('whiteboard', 'Save')}
+								</button>
+							</div>
+						</form>
+					</div>
 				)}
 			</div>
 		</div>

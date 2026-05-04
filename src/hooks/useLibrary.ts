@@ -14,6 +14,19 @@ type LibraryItemExtended = LibraryItem & {
 	filename?: string;
 }
 
+type LibrarySaveError = Error & {
+	status?: number
+}
+
+function cleanLibraryItem(item: LibraryItem): LibraryItem {
+	const cleanItem = { ...item } as LibraryItem & Record<string, unknown>
+	delete cleanItem.templateName
+	delete cleanItem.scope
+	delete cleanItem.filename
+	delete cleanItem.basename
+	return cleanItem
+}
+
 export function useLibrary() {
 	const { getJWT } = useJWTStore(
 		useShallow(state => ({
@@ -90,15 +103,18 @@ export function useLibrary() {
 			logger.error('[Library] Error fetching library:', error)
 			return null
 		}
-	})
+	}, [getJWT])
 
-	const updateLibraryItems = useCallback(async (items: LibraryItems): Promise<void> => {
+	const updateLibraryItems = useCallback(async (items: LibraryItems, excludedItemIds: Set<string> = new Set()): Promise<void> => {
 		try {
 			const jwt = await getJWT()
 			if (!jwt) {
 				logger.warn('[Library] No JWT found, cannot update library')
 				return
 			}
+			const itemsToSave = excludedItemIds.size === 0
+				? items
+				: items.filter(item => !item.id || !excludedItemIds.has(item.id))
 			const url = generateUrl('apps/whiteboard/library')
 			const response = await globalThis.fetch(url, {
 				method: 'PUT',
@@ -107,7 +123,7 @@ export function useLibrary() {
 					'X-Requested-With': 'XMLHttpRequest',
 					Authorization: `Bearer ${jwt}`,
 				},
-				body: JSON.stringify({ items }),
+				body: JSON.stringify({ items: itemsToSave }),
 			})
 
 			if (!response.ok) {
@@ -116,11 +132,40 @@ export function useLibrary() {
 		} catch (error) {
 			logger.error('[Library] Error updating library:', error)
 		}
-	})
+	}, [getJWT])
+
+	const saveLibraryTemplate = useCallback(async (templateName: string, items: LibraryItems): Promise<void> => {
+		const jwt = await getJWT()
+		if (!jwt) {
+			logger.warn('[Library] No JWT found, cannot save library preset')
+			return
+		}
+
+		const url = generateUrl('apps/whiteboard/library/template')
+		const response = await globalThis.fetch(url, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'X-Requested-With': 'XMLHttpRequest',
+				Authorization: `Bearer ${jwt}`,
+			},
+			body: JSON.stringify({
+				templateName,
+				items: items.map(cleanLibraryItem),
+			}),
+		})
+
+		if (!response.ok) {
+			const error = new Error(`Failed to save library preset: ${response.statusText}`) as LibrarySaveError
+			error.status = response.status
+			throw error
+		}
+	}, [getJWT])
 
 	return {
 		fetchLibraryItems,
 		updateLibraryItems,
+		saveLibraryTemplate,
 		isLibraryLoaded,
 		setIsLibraryLoaded,
 	}

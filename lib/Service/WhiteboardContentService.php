@@ -168,6 +168,10 @@ final class WhiteboardContentService {
 				: [];
 		}
 
+		if (array_key_exists('libraryItems', $incoming) && is_array($incoming['libraryItems'])) {
+			$normalized['libraryItems'] = $this->sanitizeLibraryItems($incoming['libraryItems']);
+		}
+
 		if (array_key_exists('appState', $incoming) && is_array($incoming['appState'])) {
 			$normalized['appState'] = $this->sanitizeAppState($incoming['appState']);
 		}
@@ -183,6 +187,10 @@ final class WhiteboardContentService {
 	 * @param array<string,mixed> $payload
 	 */
 	private function isEffectivelyEmptyPayload(array $payload): bool {
+		if (array_key_exists('libraryItems', $payload)) {
+			return false;
+		}
+
 		$hasFiles = array_key_exists('files', $payload)
 			&& is_array($payload['files'])
 			&& !empty($payload['files']);
@@ -212,7 +220,7 @@ final class WhiteboardContentService {
 		}
 
 		foreach ($payload as $key => $_value) {
-			if (!in_array($key, ['elements', 'files', 'appState', 'scrollToContent'], true)) {
+			if (!in_array($key, ['elements', 'files', 'libraryItems', 'appState', 'scrollToContent'], true)) {
 				return false;
 			}
 		}
@@ -244,6 +252,10 @@ final class WhiteboardContentService {
 			$normalized['files'] = $this->sanitizeFiles($stored['files']);
 		}
 
+		if (array_key_exists('libraryItems', $stored) && is_array($stored['libraryItems'])) {
+			$normalized['libraryItems'] = $this->sanitizeLibraryItems($stored['libraryItems']);
+		}
+
 		if (array_key_exists('appState', $stored) && is_array($stored['appState'])) {
 			$normalized['appState'] = $this->sanitizeAppState($stored['appState']);
 		} elseif (array_key_exists('appState', $stored) && $stored['appState'] === null) {
@@ -272,6 +284,10 @@ final class WhiteboardContentService {
 
 		if (array_key_exists('files', $incoming)) {
 			$merged['files'] = $incoming['files'];
+		}
+
+		if (array_key_exists('libraryItems', $incoming)) {
+			$merged['libraryItems'] = $incoming['libraryItems'];
 		}
 
 		if (array_key_exists('appState', $incoming)) {
@@ -326,6 +342,27 @@ final class WhiteboardContentService {
 
 		if (!empty($sanitized)) {
 			ksort($sanitized);
+		}
+
+		return $sanitized;
+	}
+
+	/**
+	 * @param array<mixed> $items
+	 *
+	 * @return array<int,mixed>
+	 */
+	private function sanitizeLibraryItems(array $items): array {
+		$sanitized = [];
+
+		foreach ($items as $item) {
+			if (!is_array($item) || !isset($item['elements']) || !is_array($item['elements']) || count($item['elements']) === 0) {
+				continue;
+			}
+
+			unset($item['templateName'], $item['scope'], $item['filename'], $item['basename']);
+			$item['elements'] = array_values($item['elements']);
+			$sanitized[] = $item;
 		}
 
 		return $sanitized;
